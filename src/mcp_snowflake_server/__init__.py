@@ -82,16 +82,37 @@ def main():
         if os.getenv("SNOWFLAKE_" + k.upper()) is not None
     }
 
+    # Add private key path from environment variables
+    if os.getenv("SNOWFLAKE_PRIVATE_KEY_PATH"):
+        connection_args_from_env['private_key_path'] = os.getenv("SNOWFLAKE_PRIVATE_KEY_PATH")
+    if os.getenv("SNOWFLAKE_PRIVATE_KEY_PASSPHRASE"):
+        connection_args_from_env['private_key_passphrase'] = os.getenv("SNOWFLAKE_PRIVATE_KEY_PASSPHRASE")
+
     server_args, connection_args = parse_args()
 
     connection_args = {**connection_args_from_env, **connection_args}
 
+    # Validate required parameters
+    assert (
+        "account" in connection_args
+    ), 'You must provide the account identifier as "--account" argument or "SNOWFLAKE_ACCOUNT" environment variable.'
+    assert (
+        "user" in connection_args
+    ), 'You must provide the username as "--user" argument or "SNOWFLAKE_USER" environment variable.'
     assert (
         "database" in connection_args
-    ), 'You must provide the account identifier as "--database" argument or "SNOWFLAKE_DATABASE" environment variable.'
+    ), 'You must provide the database as "--database" argument or "SNOWFLAKE_DATABASE" environment variable.'
     assert (
         "schema" in connection_args
-    ), 'You must provide the username as "--schema" argument or "SNOWFLAKE_SCHEMA" environment variable.'
+    ), 'You must provide the schema as "--schema" argument or "SNOWFLAKE_SCHEMA" environment variable.'
+    
+    # Validate authentication method
+    has_password = "password" in connection_args
+    has_private_key = "private_key_path" in connection_args
+    
+    assert (
+        has_password or has_private_key
+    ), 'You must provide either a password or a private key path for authentication.'
 
     asyncio.run(
         server.main(

@@ -3,6 +3,9 @@ import logging
 import time
 import uuid
 from typing import Any
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 from snowflake.snowpark import Session
 
@@ -25,9 +28,40 @@ class SnowflakeDB:
         self.auth_time = 0
         self.init_task = None  # To store the task reference
 
+    def _read_private_key(self, private_key_path: str, private_key_passphrase: str = None) -> bytes:
+        """Read and decrypt the private key file and convert to DER format"""
+        try:
+            with open(private_key_path, 'rb') as key_file:
+                # First load the PEM key
+                private_key = load_pem_private_key(
+                    key_file.read(),
+                    password=private_key_passphrase.encode() if private_key_passphrase else None
+                )
+                
+                # Convert to DER format as required by Snowflake
+                der_key = private_key.private_bytes(
+                    encoding=serialization.Encoding.DER,
+                    format=serialization.PrivateFormat.PKCS8,
+                    encryption_algorithm=serialization.NoEncryption()
+                )
+                return der_key
+        except Exception as e:
+            raise ValueError(f"Failed to read private key from {private_key_path}: {e}")
+
     async def _init_database(self):
         """Initialize connection to the Snowflake database"""
         try:
+            # If using key pair authentication, read the private key from the file path
+            if 'private_key_path' in self.connection_config:
+                private_key = self._read_private_key(
+                    self.connection_config['private_key_path'],
+                    self.connection_config.get('private_key_passphrase')
+                )
+                self.connection_config['private_key'] = private_key
+                # Remove the path and passphrase from config as they're not needed by Snowflake
+                self.connection_config.pop('private_key_path', None)
+                self.connection_config.pop('private_key_passphrase', None)
+
             # Create session without setting specific database and schema
             self.session = Session.builder.configs(self.connection_config).create()
 
@@ -38,6 +72,30 @@ class SnowflakeDB:
             self.auth_time = time.time()
         except Exception as e:
             raise ValueError(f"Failed to connect to Snowflake database: {e}")
+
+    async def test_connection(self) -> tuple[bool, str]:
+        """Test the connection to Snowflake and list available tables"""
+        try:
+            # If init_task exists and isn't done, wait for it to complete
+            if self.init_task and not self.init_task.done():
+                await self.init_task
+            # If session doesn't exist or has expired, initialize it and wait
+            elif not self.session or time.time() - self.auth_time > self.AUTH_EXPIRATION_TIME:
+                await self._init_database()
+
+            # Test connection by getting current role and database
+            role_info = self.session.sql("SELECT CURRENT_ROLE(), CURRENT_DATABASE(), CURRENT_SCHEMA()").collect()
+            role, database, schema = role_info[0]
+
+            # Get list of tables
+            tables = self.session.sql("SHOW TABLES").collect()
+            table_list = [table['name'] for table in tables]
+
+            return True, f"Connection successful!\nRole: {role}\nDatabase: {database}\nSchema: {schema}\n\nAvailable tables:\n" + "\n".join(f"- {table}" for table in table_list)
+
+        except Exception as e:
+            logger.error(f"Connection test failed: {e}")
+            return False, f"Connection test failed: {e}"
 
     def start_init_connection(self):
         """Start database initialization in the background"""
