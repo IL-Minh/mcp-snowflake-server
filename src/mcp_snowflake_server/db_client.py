@@ -3,11 +3,7 @@ import logging
 import time
 import uuid
 from typing import Any
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.serialization import load_pem_private_key
-from cryptography.hazmat.primitives.asymmetric import rsa
-
-from snowflake.snowpark import Session
+import snowflake.connector
 
 # Configure logging
 logging.basicConfig(
@@ -23,53 +19,33 @@ class SnowflakeDB:
 
     def __init__(self, connection_config: dict):
         self.connection_config = connection_config
-        self.session = None
+        self.connection = None
+        self.cursor = None
         self.insights: list[str] = []
         self.auth_time = 0
         self.init_task = None  # To store the task reference
 
-    def _read_private_key(self, private_key_path: str, private_key_passphrase: str = None) -> bytes:
-        """Read and decrypt the private key file and convert to DER format"""
-        try:
-            with open(private_key_path, 'rb') as key_file:
-                # First load the PEM key
-                private_key = load_pem_private_key(
-                    key_file.read(),
-                    password=private_key_passphrase.encode() if private_key_passphrase else None
-                )
-                
-                # Convert to DER format as required by Snowflake
-                der_key = private_key.private_bytes(
-                    encoding=serialization.Encoding.DER,
-                    format=serialization.PrivateFormat.PKCS8,
-                    encryption_algorithm=serialization.NoEncryption()
-                )
-                return der_key
-        except Exception as e:
-            raise ValueError(f"Failed to read private key from {private_key_path}: {e}")
-
     async def _init_database(self):
         """Initialize connection to the Snowflake database"""
         try:
-            # If using key pair authentication, read the private key from the file path
-            if 'private_key_path' in self.connection_config:
-                private_key = self._read_private_key(
-                    self.connection_config['private_key_path'],
-                    self.connection_config.get('private_key_passphrase')
-                )
-                self.connection_config['private_key'] = private_key
-                # Remove the path and passphrase from config as they're not needed by Snowflake
-                self.connection_config.pop('private_key_path', None)
-                self.connection_config.pop('private_key_passphrase', None)
+            # Configure connection parameters
+            conn_params = {
+                'account': self.connection_config.get('account'),
+                'user': self.connection_config.get('user'),
+                'authenticator': 'SNOWFLAKE_JWT',
+                'private_key_file': self.connection_config.get('private_key_path'),
+                'private_key_file_pwd': self.connection_config.get('private_key_passphrase'),
+                'warehouse': self.connection_config.get('warehouse'),
+                'database': self.connection_config.get('database'),
+                'schema': self.connection_config.get('schema'),
+                'role': self.connection_config.get('role')
+            }
 
-            # Create session without setting specific database and schema
-            self.session = Session.builder.configs(self.connection_config).create()
-
-            # Set initial warehouse if provided, but don't set database or schema
-            if "warehouse" in self.connection_config:
-                self.session.sql(f"USE WAREHOUSE {self.connection_config['warehouse'].upper()}")
-
+            # Create connection
+            self.connection = snowflake.connector.connect(**conn_params)
+            self.cursor = self.connection.cursor()
             self.auth_time = time.time()
+
         except Exception as e:
             raise ValueError(f"Failed to connect to Snowflake database: {e}")
 
@@ -79,17 +55,18 @@ class SnowflakeDB:
             # If init_task exists and isn't done, wait for it to complete
             if self.init_task and not self.init_task.done():
                 await self.init_task
-            # If session doesn't exist or has expired, initialize it and wait
-            elif not self.session or time.time() - self.auth_time > self.AUTH_EXPIRATION_TIME:
+            # If connection doesn't exist or has expired, initialize it and wait
+            elif not self.connection or time.time() - self.auth_time > self.AUTH_EXPIRATION_TIME:
                 await self._init_database()
 
             # Test connection by getting current role and database
-            role_info = self.session.sql("SELECT CURRENT_ROLE(), CURRENT_DATABASE(), CURRENT_SCHEMA()").collect()
-            role, database, schema = role_info[0]
+            self.cursor.execute("SELECT CURRENT_ROLE(), CURRENT_DATABASE(), CURRENT_SCHEMA()")
+            role, database, schema = self.cursor.fetchone()
 
             # Get list of tables
-            tables = self.session.sql("SHOW TABLES").collect()
-            table_list = [table['name'] for table in tables]
+            self.cursor.execute("SHOW TABLES")
+            tables = self.cursor.fetchall()
+            table_list = [table[1] for table in tables]  # Table name is in the second column
 
             return True, f"Connection successful!\nRole: {role}\nDatabase: {database}\nSchema: {schema}\n\nAvailable tables:\n" + "\n".join(f"- {table}" for table in table_list)
 
@@ -109,14 +86,15 @@ class SnowflakeDB:
         # If init_task exists and isn't done, wait for it to complete
         if self.init_task and not self.init_task.done():
             await self.init_task
-        # If session doesn't exist or has expired, initialize it and wait
-        elif not self.session or time.time() - self.auth_time > self.AUTH_EXPIRATION_TIME:
+        # If connection doesn't exist or has expired, initialize it and wait
+        elif not self.connection or time.time() - self.auth_time > self.AUTH_EXPIRATION_TIME:
             await self._init_database()
 
         logger.debug(f"Executing query: {query}")
         try:
-            result = self.session.sql(query).to_pandas()
-            result_rows = result.to_dict(orient="records")
+            self.cursor.execute(query)
+            columns = [desc[0] for desc in self.cursor.description]
+            result_rows = [dict(zip(columns, row)) for row in self.cursor.fetchall()]
             data_id = str(uuid.uuid4())
 
             return result_rows, data_id
