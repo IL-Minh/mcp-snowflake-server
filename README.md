@@ -106,7 +106,6 @@ npx -y @smithery/cli install mcp_snowflake_server --client claude
       "--account", "your_account",
       "--warehouse", "your_warehouse",
       "--user", "your_user",
-      "--password", "your_password",
       "--role", "your_role",
       "--database", "your_database",
       "--schema", "your_schema"
@@ -140,9 +139,8 @@ SNOWFLAKE_ROLE="xxx"
 SNOWFLAKE_DATABASE="xxx"
 SNOWFLAKE_SCHEMA="xxx"
 SNOWFLAKE_WAREHOUSE="xxx"
-SNOWFLAKE_PASSWORD="xxx"
-# Alternatively, use external browser authentication:
-# SNOWFLAKE_AUTHENTICATOR="externalbrowser"
+SNOWFLAKE_PRIVATE_KEY_PATH="/path/to/your/private_key.p8"
+SNOWFLAKE_PRIVATE_KEY_PASSPHRASE="your_passphrase_if_any"  # Optional if key is encrypted
 ```
 
 4. [Optional] Modify `runtime_config.json` to set exclusion patterns for databases, schemas, or tables.
@@ -170,6 +168,29 @@ uv --directory /absolute/path/to/mcp_snowflake_server run mcp_snowflake_server
     ]
   }
 }
+```
+
+---
+
+## Authentication
+
+The server uses key pair authentication with Snowflake. To set this up:
+
+1. Generate a key pair using OpenSSL:
+```bash
+openssl genrsa -out rsa_key.pem 2048
+openssl pkcs8 -topk8 -inform PEM -outform PEM -in rsa_key.pem -out rsa_key.p8 -nocrypt
+```
+
+2. Add the public key to your Snowflake user:
+```sql
+ALTER USER your_username SET RSA_PUBLIC_KEY='your_public_key';
+```
+
+3. Set the private key path and optional passphrase in your `.env` file:
+```bash
+SNOWFLAKE_PRIVATE_KEY_PATH="/path/to/rsa_key.p8"
+SNOWFLAKE_PRIVATE_KEY_PASSPHRASE="your_passphrase_if_any"  # Optional
 ```
 
 ---
